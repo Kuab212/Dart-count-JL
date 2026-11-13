@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Dart – licznik z kamerą</title>
+<style>
+:root{--bg:#fff;--fg:#111;--card:#f0f0f0;--ac:#0a7d3b;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#121212;--fg:#eee;--card:#222;--ac:#3ddc84;color-scheme:dark}}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px system-ui,sans-serif;padding:8px}
+canvas{width:100%;max-width:640px;background:#000;border-radius:8px;touch-action:manipulation}
+.pl{display:flex;justify-content:space-between;align-items:center;padding:8px 12px;margin:4px 0;border-radius:8px;background:var(--card);font-size:20px}.pl.on{outline:3px solid var(--ac)}.pl b{font-size:34px;color:var(--ac)}.pl i{cursor:pointer;margin-left:10px;opacity:.6;font-style:normal}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:6px 0}
+button{padding:10px 14px;border:0;border-radius:8px;background:var(--card);color:var(--fg);font-size:15px}
+button.p{background:var(--ac);color:#000}
+#msg{min-height:22px}
+</style>
+</head>
+<body>
+<canvas id="cv" width="640" height="480"></canvas>
+<div id="msg">Start kamery…</div>
+<div id="board"></div>
+<div id="darts" style="margin:6px 0;min-height:22px"></div>
+<div class="row"><input id="pn" placeholder="Imię gracza" style="padding:9px;border-radius:8px;border:1px solid #888;background:var(--card);color:var(--fg)"><button id="addp">+ Dodaj gracza</button></div>
+<div class="row">
+<button class="p" id="cam">▶ Włącz kamerę</button>
+<button id="phb">📷 Tryb zdjęć</button><input type="file" id="ph" accept="image/*" capture="environment" style="display:none">
+<button class="p" id="cal">1. Kalibruj tarczę</button>
+<button id="next">Następny gracz (ręcznie)</button>
+<button id="undo">Cofnij lotkę</button>
+<button id="reset">Nowa gra</button>
+</div>
+<div class="row">
+<label>Gra do <select id="start"><option>301</option><option selected>501</option><option>701</option></select></label>
+<label>Mecz do <select id="legs"><option value="1">1 lega</option><option value="2">2 legów</option><option value="3">3 legów</option><option value="4">4 legów</option><option value="5">5 legów</option></select></label>
+<label><input type="checkbox" id="dout"> double-out</label>
+<label><input type="checkbox" id="auto" checked> auto-wykrywanie (eksperyment)</label>
+<label><input type="checkbox" id="voice" checked> głos</label>
+</div>
+<details><summary>🔊 Ustawienia głosu</summary>
+<div class="row"><label>Język <select id="lang"><option value="pl">Polski</option><option value="en">Angielski (styl callera)</option></select></label>
+<label>Głos <select id="vsel"></select></label></div>
+<div class="row"><label>Tempo <input type="range" id="rate" min=".6" max="1.4" step=".05" value=".95"></label>
+<label>Wysokość <input type="range" id="pitch" min=".6" max="1.4" step=".05" value="1"></label>
+<label>Ekspresja <input type="range" id="expr" min="0" max="100" step="5" value="80"></label></div>
+<div class="row"><label>Własne nagrania <input type="file" id="pk" multiple accept="audio/*"></label><button id="tv">Test głosu</button></div>
+<small>Pliki nazwij: 0.mp3 … 180.mp3, bust.mp3, gameshot.mp3 (brakujące mówi lektor). Pliki zostają tylko w Twojej przeglądarce.</small>
+</details>
+<video id="v" playsinline muted style="display:none"></video>
+<script>
+const SEG=[20,1,18,4,13,6,10,15,2,17,3,19,7,16,8,11,14,9,12,5];
+const $=id=>document.getElementById(id), cv=$('cv'), ctx=cv.getContext('2d',{willReadFrequently:true}), v=$('v');
+let mode='cal0', cal=null, ref=null, base=null, lastN=0, stable=0, darts=[], lastD=null, prevG=null;
+let players=[{n:'Gracz 1',r:501,l:0}], cur=0, turnStart=501, over=false, bust=false, won=false, legEnd=false, legStarter=0, pull=null;
+const BOGEY=[159,162,163,165,166,168,169];
+const startVal=()=>+$('start').value, target=()=>+$('legs').value;
+const U=['zero','jeden','dwa','trzy','cztery','pięć','sześć','siedem','osiem','dziewięć','dziesięć','jedenaście','dwanaście','trzynaście','czternaście','piętnaście','szesnaście','siedemnaście','osiemnaście','dziewiętnaście'];
+const T=['','','dwadzieścia','trzydzieści','czterdzieści','pięćdziesiąt','sześćdziesiąt','siedemdziesiąt','osiemdziesiąt','dziewięćdziesiąt'];
+const H=['','sto','dwieście','trzysta','czterysta','pięćset','sześćset','siedemset','osiemset','dziewięćset'];
+function words(n){ if(n<20)return U[n]; if(n<100)return T[n/10|0]+(n%10?' '+U[n%10]:''); return H[n/100|0]+(n%100?' '+words(n%100):''); }
+
+const vc=document.createElement('canvas');vc.width=640;vc.height=480;const vctx=vc.getContext('2d',{willReadFrequently:true});
+let photo=null, photoMode=false, started=false;
+let sid=0, pack={}, curAudio=null;
+const PL={code:'pl-PL',num:n=>words(n),zero:'zero',bust:'Przekroczone',req:n=>n+', zostało ci',leg:n=>n+' wygrywa lega',match:n=>n+' wygrywa mecz'};
+const EN={code:'en-GB',num:n=>enWords(n),zero:'No score',bust:'Bust',req:n=>n+', you require',leg:n=>'Game shot, '+n,match:n=>'Game shot and the match, '+n};
+const L=()=>$('lang').value==='en'?EN:PL;
+function enWords(n){const u=['zero','one','two','three','four','five','six','seven','eight','nine','ten','eleven','twelve','thirteen','fourteen','fifteen','sixteen','seventeen','eighteen','nineteen'],t=['','','twenty','thirty','forty','fifty','sixty','seventy','eighty','ninety'];
+  if(n<20)return u[n]; if(n<100)return t[n/10|0]+(n%10?' '+u[n%10]:''); return u[n/100|0]+' hundred'+(n%100?' and '+enWords(n%100):'');}
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+const clamp=(x,a,b)=>Math.min(b,Math.max(a,x));
+function prosody(it){
+  const br=+$('rate').value, bp=+$('pitch').value, ex=$('expr').value/100;
+  let rate=br, pitch=bp;
+  if(it.tone==='low'){pitch=bp*(1-.15*ex);rate=br*.9;}
+  else if(it.tone==='high'){pitch=bp*(1+.3*ex);rate=br;}
+  else if(it.calm){pitch=bp*(1-.04*ex);rate=br*.95;}
+  else if(it.num!==undefined){
+    const t=it.num, lv=t/180;
+    if(t===180){pitch=bp*(1+.55*ex);rate=br*.85;}
+    else if(t<30){pitch=bp*(1-.15*ex);rate=br*.9;}
+    else{pitch=bp*(1-.1*ex+.5*ex*lv);rate=br*(.95+.12*ex*lv);}
+  }
+  return{rate:clamp(rate,.1,2),pitch:clamp(pitch,0,2)};
+}
+function getVoice(){const n=$('vsel').value;return n?speechSynthesis.getVoices().find(v=>v.name===n):null;}
+function tts(text,pr){return new Promise(res=>{
+  if(!window.speechSynthesis)return res();
+  const u=new SpeechSynthesisUtterance(text);u.lang=L().code;const v=getVoice();if(v)u.voice=v;
+  u.rate=pr.rate;u.pitch=pr.pitch;u.onend=u.onerror=()=>res();speechSynthesis.speak(u);setTimeout(res,9000);});}
+function playFile(url){return new Promise(res=>{const a=new Audio(url);curAudio=a;a.onended=a.onerror=()=>res();a.play().catch(()=>res());});}
+async function speak(items){
+  if(!$('voice').checked)return;
+  const my=++sid; try{speechSynthesis.cancel();}catch(e){} if(curAudio){curAudio.pause();curAudio=null;}
+  for(const it of items){
+    if(my!==sid)return;
+    const k=it.key||(it.num!==undefined?String(it.num):null);
+    if(k&&pack[k]){await playFile(pack[k]);await sleep(80);continue;}
+    let text=it.text!==undefined?it.text:(it.num===0?L().zero:L().num(it.num));
+    if(!it.calm&&it.num>=100)text+='!';
+    await tts(text,prosody(it)); await sleep(70);
+  }
+}
+function say(t,items){ $('msg').textContent=t; if(items)speak(items); }
+function popVoices(){
+  if(!window.speechSynthesis)return;
+  const p=L().code.slice(0,2), vs=speechSynthesis.getVoices().filter(v=>v.lang.toLowerCase().startsWith(p));
+  $('vsel').innerHTML='<option value="">(domyślny)</option>'+vs.map(v=>'<option>'+v.name+'</option>').join('');
+}
+function info(t){$('msg').textContent=t}
+const reqItems=r=>[{text:L().req(players[cur].n),calm:true},{num:r,calm:true}];
+const sum=()=>darts.reduce((a,d)=>a+d.p,0);
+function fin(r){ if(r>=2&&r<=170&&!BOGEY.includes(r)){const n=players[cur].n; return {d:n+', zostało ci '+r, s:n+', zostało ci '+words(r)};} return null; }
+
+function score(x,y){
+  const dx=x-cal.cx, dy=y-cal.cy, r=Math.hypot(dx,dy)/cal.R;
+  if(r>1)return{p:0,l:'poza tarczą',d:false};
+  if(r<=0.0374)return{p:50,l:'bull',d:true};
+  if(r<=0.0935)return{p:25,l:'25',d:false};
+  let a=(Math.atan2(dx,-dy)-cal.rot)*180/Math.PI; a=((a%360)+360)%360;
+  const s=SEG[Math.floor(((a+9)%360)/18)];
+  if(r>=0.953)return{p:2*s,l:'double '+s,d:true};
+  if(r>=0.582&&r<=0.629)return{p:3*s,l:'triple '+s,d:false};
+  return{p:s,l:String(s),d:false};
+}
+
+function addDart(x,y){
+  if(!cal||over||won||darts.length>=3)return;
+  const s=score(x,y); s.x=x; s.y=y; darts.push(s);
+  const P=players[cur], r=P.r-sum();
+  if(r<0||($('dout').checked&&(r===1||(r===0&&!s.d)))){
+    bust=true;over=true;startPull();render();const f=fin(P.r);
+    say('Przekroczone!'+(f?' '+f.d:''),[{key:'bust',text:L().bust,tone:'low'}].concat(f?reqItems(P.r):[]));return;}
+  if(r===0){
+    P.r=0;P.l++;over=true;legEnd=true;
+    if(P.l>=target()){won=true;say(P.n+' wygrywa mecz!',[{key:'gameshot',text:L().match(P.n),tone:'high'}]);}
+    else{startPull();say(P.n+' wygrywa lega!',[{key:'gameshot',text:L().leg(P.n),tone:'high'}]);}
+    render();return;}
+  render();
+  if(darts.length===3)endTurn();
+}
+function startPull(){if(photoMode){pull=null;return;}pull={moved:false,calm:0};prevG=null;}
+function endTurn(){
+  if(over)return; const P=players[cur], t=sum();
+  P.r-=t; over=true; startPull(); render();
+  const f=fin(P.r);
+  say(t+(f?' · '+f.d:''),[{num:t}].concat(f?reqItems(P.r):[]));
+}
+function liveRem(i){return (i===cur&&!over)?players[i].r-sum():players[i].r;}
+const esc=t=>t.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+function render(){
+  $('board').innerHTML=players.map((p,i)=>'<div class="pl'+(i===cur?' on':'')+'"><span>'+esc(p.n)+' <small>legi: '+p.l+'/'+target()+'</small></span><span><b>'+liveRem(i)+'</b>'+(players.length>1?'<i data-x="'+i+'">✕</i>':'')+'</span></div>').join('');
+  $('darts').textContent=(bust?'PRZEKROCZONE · ':'')+darts.map(d=>d.l+' ('+d.p+')').join(' · ')+(darts.length?' = '+sum():'')+(pull?' · wyjmij lotki – zmiana nastąpi automatycznie':'');
+}
+function nextPlayer(){
+  if(won)return;
+  endTurn(); pull=null;
+  if(legEnd){players.forEach(p=>p.r=startVal());legStarter=(legStarter+1)%players.length;cur=legStarter;legEnd=false;}
+  else cur=(cur+1)%players.length;
+  turnStart=players[cur].r; darts=[]; over=false; bust=false; snap(); render();
+  info('Rzuca: '+players[cur].n+' ('+players[cur].r+')');
+}
+function pullStep(){
+  const g=gray();
+  if(prevG){
+    let c=0;for(let y=0;y<480;y+=4)for(let x=0;x<640;x+=4){const i=y*640+x;if(Math.abs(g[i]-prevG[i])>30)c++;}
+    if(c>40){pull.moved=true;pull.calm=0;}else if(pull.moved)pull.calm++;
+    if(pull.moved&&pull.calm>=8){prevG=null;nextPlayer();return;}
+  }
+  prevG=g;
+}
+$('addp').onclick=()=>{const n=$('pn').value.trim()||('Gracz '+(players.length+1));players.push({n,r:startVal(),l:0});$('pn').value='';render();};
+$('legs').onchange=render;
+$('lang').onchange=popVoices;
+if(window.speechSynthesis)speechSynthesis.onvoiceschanged=popVoices; popVoices();
+$('pk').onchange=e=>{pack={};for(const f of e.target.files)pack[f.name.replace(/\.[^.]+$/,'').toLowerCase()]=URL.createObjectURL(f);info('Wczytano nagrań: '+Object.keys(pack).length);};
+$('tv').onclick=()=>speak([{num:26},{num:85},{num:140},{num:180},{key:'bust',text:L().bust,tone:'low'}]);
+$('board').onclick=e=>{const x=e.target.dataset.x;if(x===undefined)return;players.splice(+x,1);if(cur>=players.length)cur=0;if(+x<cur)cur--;turnStart=players[cur].r;darts=[];over=false;bust=false;legEnd=false;pull=null;render();};
+
+$('cal').onclick=()=>{mode='cal0';cal=null;info('Dotknij ŚRODKA tarczy (bull) na obrazie');};
+$('next').onclick=nextPlayer;
+$('undo').onclick=()=>{if(!darts.length)return;if(legEnd){players[cur].l--;legEnd=false;}darts.pop();players[cur].r=turnStart;over=false;bust=false;won=false;pull=null;render();};
+$('reset').onclick=()=>{players.forEach(p=>{p.r=startVal();p.l=0});cur=0;legStarter=0;turnStart=startVal();darts=[];over=false;bust=false;won=false;legEnd=false;pull=null;snap();render();info('Nowa gra. Rzuca: '+players[0].n);};
+$('start').onchange=()=>$('reset').onclick();
+
+cv.addEventListener('click',e=>{
+  const b=cv.getBoundingClientRect(), x=(e.clientX-b.left)*cv.width/b.width, y=(e.clientY-b.top)*cv.height/b.height;
+  if(mode==='cal0'){lastD={x,y};mode='cal1';info('Teraz dotknij środka zewnętrznego pierścienia podwójnego (double) w polu 20 – u góry');}
+  else if(mode==='cal1'){
+    const R=Math.hypot(x-lastD.x,y-lastD.y);
+    cal={cx:lastD.x,cy:lastD.y,R:R*1.0,rot:Math.atan2(x-lastD.x,-(y-lastD.y))};
+    mode='play';snap();render();info('Gotowe. Rzuca: '+players[cur].n+'. Dotknięcie obrazu dodaje lotkę ręcznie.');
+  } else if(mode==='play'){ addDart(x,y); }
+});
+
+function gray(){const d=vctx.getImageData(0,0,640,480).data,g=new Uint8Array(307200);for(let i=0,j=0;j<307200;i+=4,j++)g[j]=(d[i]+d[i+1]+d[i+2])/3;return g;}
+function snap(){ if(mode==='play'||cal){ref=gray();base=new Uint8Array(307200);lastN=0;stable=0;} }
+
+function detect(){
+  if(photoMode||mode!=='play'||!ref)return;
+  if(pull){pullStep();return;}
+  if(!$('auto').checked||darts.length>=3||over||won)return;
+  const g=gray(), mask=new Uint8Array(307200), pts=[]; const R2=(cal.R*1.05)**2; let n=0;
+  const x0=Math.max(0,cal.cx-cal.R|0), x1=Math.min(639,cal.cx+cal.R|0), y0=Math.max(0,cal.cy-cal.R|0), y1=Math.min(479,cal.cy+cal.R|0);
+  for(let y=y0;y<=y1;y++)for(let x=x0;x<=x1;x++){
+    const i=y*640+x; if((x-cal.cx)**2+(y-cal.cy)**2>R2)continue;
+    if(Math.abs(g[i]-ref[i])>45){mask[i]=1; if(!base[i]){n++;pts.push(i);}}
+  }
+  if(n>120&&n<8000&&Math.abs(n-lastN)<n*0.12){stable++;} else stable=0;
+  lastN=n;
+  if(stable>=4){
+    // czubek = najniżej położone piksele nowej plamy (lotka zwykle zwisa lotkami w górę)
+    pts.sort((a,b)=>b-a); const k=pts.slice(0,Math.max(5,pts.length*0.06|0));
+    let sx=0,sy=0; k.forEach(i=>{sx+=i%640;sy+=(i/640)|0;});
+    base=mask; stable=0; lastN=0; addDart(sx/k.length,sy/k.length);
+  }
+}
+
+function fit(src,sw,sh){vctx.fillStyle='#000';vctx.fillRect(0,0,640,480);const k=Math.min(640/sw,480/sh),w=sw*k,h=sh*k;vctx.drawImage(src,(640-w)/2,(480-h)/2,w,h);}
+function draw(){
+  if(!photoMode&&v.readyState>=2&&v.videoWidth)fit(v,v.videoWidth,v.videoHeight);
+  ctx.drawImage(vc,0,0);
+  if(cal){
+    ctx.strokeStyle='#0f0';ctx.lineWidth=2;
+    [1,.953,.629,.582,.0935,.0374].forEach(f=>{ctx.beginPath();ctx.arc(cal.cx,cal.cy,cal.R*f,0,7);ctx.stroke();});
+    ctx.strokeStyle='#ff0';
+    for(let i=0;i<20;i++){const a=cal.rot+(i*18-9)*Math.PI/180;ctx.beginPath();ctx.moveTo(cal.cx+Math.sin(a)*cal.R*.0935,cal.cy-Math.cos(a)*cal.R*.0935);ctx.lineTo(cal.cx+Math.sin(a)*cal.R,cal.cy-Math.cos(a)*cal.R);ctx.stroke();}
+    ctx.fillStyle='#f00';darts.forEach(d=>{ctx.beginPath();ctx.arc(d.x,d.y,5,0,7);ctx.fill();});
+  }
+  requestAnimationFrame(draw);
+}
+async function startCam(){
+  photoMode=false;photo=null;
+  if(!window.isSecureContext||!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){
+    info('Ta strona nie ma dostępu do kamery, bo nie jest otwarta przez bezpieczny adres https:// (np. została otwarta z pliku lub z Messengera). Otwórz ją z adresu https:// albo użyj „📷 Tryb zdjęć".');return;}
+  try{
+    const st=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'},width:{ideal:1280},height:{ideal:720}},audio:false});
+    v.srcObject=st; await v.play();
+    info(mode==='play'?'Kamera działa.':'Kamera działa. Ustaw telefon na wprost tarczy i dotknij środka tarczy (bull).');
+  }catch(e){
+    const h={NotAllowedError:'Zezwól na kamerę (ikona kłódki przy adresie → Uprawnienia) i kliknij „Włącz kamerę". Jeśli strona jest osadzona w innej aplikacji, otwórz ją w pełnym oknie przeglądarki.',NotFoundError:'Nie znaleziono kamery.',NotReadableError:'Kamera jest zajęta przez inną aplikację – zamknij ją i spróbuj ponownie.'}[e.name]||'Spróbuj ponownie lub użyj „📷 Tryb zdjęć".';
+    info('Kamera niedostępna ('+e.name+'). '+h);
+  }
+}
+$('cam').onclick=startCam;
+$('phb').onclick=()=>$('ph').click();
+$('ph').onchange=e=>{
+  const f=e.target.files[0]; if(!f)return;
+  const im=new Image(); im.onload=()=>{photoMode=true;photo=im;pull=null;fit(im,im.naturalWidth,im.naturalHeight);
+    if(!cal){mode='cal0';info('Tryb zdjęć. Dotknij ŚRODKA tarczy (bull) na zdjęciu.');}
+    else{mode='play';info('Tryb zdjęć. Dotknij miejsc, w których wbiły się lotki. Po rundzie zrób nowe zdjęcie.');}};
+  im.src=URL.createObjectURL(f); e.target.value='';
+};
+render(); draw(); setInterval(detect,250); startCam();
+</script>
+</body>
+</html>
