@@ -22,6 +22,7 @@ button.p{background:var(--ac);color:#000}
 <div id="board"></div>
 <div id="darts" style="margin:6px 0;min-height:22px"></div>
 <div class="row"><input id="pn" placeholder="Imię gracza" style="padding:9px;border-radius:8px;border:1px solid #888;background:var(--card);color:var(--fg)"><button id="addp">+ Dodaj gracza</button></div>
+<div class="row"><select id="bl"></select><button id="addb">🤖 Dodaj bota</button></div>
 <div class="row">
 <button class="p" id="cam">▶ Włącz kamerę</button>
 <button id="phb">📷 Tryb zdjęć</button><input type="file" id="ph" accept="image/*" capture="environment" style="display:none">
@@ -50,8 +51,48 @@ button.p{background:var(--ac);color:#000}
 <script>
 const SEG=[20,1,18,4,13,6,10,15,2,17,3,19,7,16,8,11,14,9,12,5];
 const $=id=>document.getElementById(id), cv=$('cv'), ctx=cv.getContext('2d',{willReadFrequently:true}), v=$('v');
-let mode='cal0', cal=null, ref=null, base=null, lastN=0, stable=0, darts=[], lastD=null, prevG=null;
-let players=[{n:'Gracz 1',r:501,l:0}], cur=0, turnStart=501, over=false, bust=false, won=false, legEnd=false, legStarter=0, pull=null;
+let mode='cal', calPts=[], cal=null, ref=null, base=null, lastN=0, stable=0, darts=[], lastD=null, prevG=null;
+let players=[{n:'Gracz 1',r:501,l:0,pts:0,nd:0,bot:0}], cur=0, turnStart=501, over=false, bust=false, won=false, legEnd=false, legStarter=0, pull=null;
+let lastStat=null, botBusy=false, roi=new Int32Array(0);
+const CALMSG=['Kalibracja 1/4: dotknij ZEWNĘTRZNEJ krawędzi pola DOUBLE 20 (górny środek tarczy).','Kalibracja 2/4: zewnętrzna krawędź pola DOUBLE 6 (prawa strona tarczy).','Kalibracja 3/4: zewnętrzna krawędź pola DOUBLE 3 (dół tarczy).','Kalibracja 4/4: zewnętrzna krawędź pola DOUBLE 11 (lewa strona tarczy).'];
+const BP=[[0,-1],[1,0],[0,1],[-1,0]];
+function homog(src,dst){
+  const A=[];for(let i=0;i<4;i++){const[x,y]=src[i],[u,v]=dst[i];
+    A.push([x,y,1,0,0,0,-u*x,-u*y,u]);A.push([0,0,0,x,y,1,-v*x,-v*y,v]);}
+  for(let c=0;c<8;c++){let p=c;for(let r=c+1;r<8;r++)if(Math.abs(A[r][c])>Math.abs(A[p][c]))p=r;[A[c],A[p]]=[A[p],A[c]];
+    for(let r=0;r<8;r++)if(r!==c){const f=A[r][c]/A[c][c];for(let k=c;k<9;k++)A[r][k]-=f*A[c][k];}}
+  return A.map((r,i)=>r[8]/r[i]).slice(0,8);
+}
+function apply(H,x,y){const w=H[6]*x+H[7]*y+1;return[(H[0]*x+H[1]*y+H[2])/w,(H[3]*x+H[4]*y+H[5])/w];}
+function buildRoi(){const a=[];for(let y=0;y<480;y++)for(let x=0;x<640;x++){const H=cal.H,w=H[6]*x+H[7]*y+1;if(w<=0)continue;
+  const bx=(H[0]*x+H[1]*y+H[2])/w,by=(H[3]*x+H[4]*y+H[5])/w;if(bx*bx+by*by<=1.1)a.push(y*640+x);}roi=Int32Array.from(a);}
+const LV=[null,[20,.05],[28,.08],[36,.12],[43,.16],[50,.20],[57,.22],[64,.235],[70,.25]];
+const OPT=[{p:0,l:'pudło',d:false},{p:25,l:'25',d:false},{p:50,l:'bull',d:true}];
+for(let i=1;i<=20;i++)OPT.push({p:i,l:''+i,d:false},{p:2*i,l:'double '+i,d:true},{p:3*i,l:'triple '+i,d:false});
+const G=Array.from({length:3000},()=>{let u=0,v=0;while(!u)u=Math.random();v=Math.random();return Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*v);});
+const gauss=()=>G[Math.random()*3000|0];
+const MU={};
+function muFor(l){if(MU[l])return MU[l];const m=LV[l][0]/3*1.2,sd=Math.min(18,5+m*.5);let lo=-40,hi=100;
+  for(let it=0;it<14;it++){const mid=(lo+hi)/2;let t=0;for(let k=0;k<3000;k++)t+=Math.min(60,Math.max(0,mid+sd*G[k]));(t/3000<m?lo=mid:hi=mid);}
+  return MU[l]=[(lo+hi)/2,sd];}
+function near(t,maxP){let best=[],bd=1e9;for(const o of OPT){if(o.d||o.p>maxP)continue;const d=Math.abs(o.p-t);if(d<bd-1e-9){bd=d;best=[o];}else if(Math.abs(d-bd)<1e-9)best.push(o);}
+  return{...best[Math.random()*best.length|0]};}
+function botDart(P){
+  const[avg,dbl]=LV[P.bot],rem=P.r-sum();
+  if((rem<=40&&rem%2===0&&rem>=2)||rem===50){
+    if(Math.random()<dbl)return rem===50?{p:50,l:'bull',d:true}:{p:rem,l:'double '+rem/2,d:true};
+    if(Math.random()<.45){if(rem===50)return{p:25,l:'25',d:false};const h=rem/2;if(h>=2)return{p:h,l:''+h,d:false};}
+    return{p:0,l:'pudło',d:false};}
+  if(rem<=40&&rem%2===1&&rem>=3)return Math.random()<.7?{p:1,l:'1',d:false}:{p:0,l:'pudło',d:false};
+  const[mu,sd]=muFor(P.bot);return near(Math.min(60,Math.max(0,mu+sd*gauss())),Math.max(0,rem-2));
+}
+function botTurn(){
+  const P=players[cur]; if(!P||!P.bot||over||won||botBusy)return; botBusy=true;
+  const step=()=>{ if(players[cur]!==P||over||won||darts.length>=3){botBusy=false;return;}
+    registerDart(botDart(P)); if(!over&&darts.length<3)setTimeout(step,900); else botBusy=false; };
+  setTimeout(step,300);
+}
+function stat(P,pts){P.pts+=pts;P.nd+=darts.length;lastStat={P,pts,nd:darts.length};}
 const BOGEY=[159,162,163,165,166,168,169];
 const startVal=()=>+$('start').value, target=()=>+$('legs').value;
 const U=['zero','jeden','dwa','trzy','cztery','pięć','sześć','siedem','osiem','dziewięć','dziesięć','jedenaście','dwanaście','trzynaście','czternaście','piętnaście','szesnaście','siedemnaście','osiemnaście','dziewiętnaście'];
@@ -113,43 +154,43 @@ const sum=()=>darts.reduce((a,d)=>a+d.p,0);
 function fin(r){ if(r>=2&&r<=170&&!BOGEY.includes(r)){const n=players[cur].n; return {d:n+', zostało ci '+r, s:n+', zostało ci '+words(r)};} return null; }
 
 function score(x,y){
-  const dx=x-cal.cx, dy=y-cal.cy, r=Math.hypot(dx,dy)/cal.R;
-  if(r>1)return{p:0,l:'poza tarczą',d:false};
+  const[bx,by]=apply(cal.H,x,y), r=Math.hypot(bx,by);
+  if(!(r<=1))return{p:0,l:'poza tarczą',d:false};
   if(r<=0.0374)return{p:50,l:'bull',d:true};
   if(r<=0.0935)return{p:25,l:'25',d:false};
-  let a=(Math.atan2(dx,-dy)-cal.rot)*180/Math.PI; a=((a%360)+360)%360;
+  let a=Math.atan2(bx,-by)*180/Math.PI; a=((a%360)+360)%360;
   const s=SEG[Math.floor(((a+9)%360)/18)];
   if(r>=0.953)return{p:2*s,l:'double '+s,d:true};
   if(r>=0.582&&r<=0.629)return{p:3*s,l:'triple '+s,d:false};
   return{p:s,l:String(s),d:false};
 }
 
-function addDart(x,y){
-  if(!cal||over||won||darts.length>=3)return;
-  const s=score(x,y); s.x=x; s.y=y; darts.push(s);
+function addDart(x,y){ if(!cal||over||won||darts.length>=3||players[cur].bot)return; const s=score(x,y); s.x=x; s.y=y; registerDart(s); }
+function registerDart(s){
+  if(over||won||darts.length>=3)return; darts.push(s);
   const P=players[cur], r=P.r-sum();
   if(r<0||($('dout').checked&&(r===1||(r===0&&!s.d)))){
-    bust=true;over=true;startPull();render();const f=fin(P.r);
+    bust=true;over=true;stat(P,0);startPull();render();const f=fin(P.r);
     say('Przekroczone!'+(f?' '+f.d:''),[{key:'bust',text:L().bust,tone:'low'}].concat(f?reqItems(P.r):[]));return;}
   if(r===0){
-    P.r=0;P.l++;over=true;legEnd=true;
+    P.r=0;P.l++;over=true;legEnd=true;stat(P,sum());
     if(P.l>=target()){won=true;say(P.n+' wygrywa mecz!',[{key:'gameshot',text:L().match(P.n),tone:'high'}]);}
     else{startPull();say(P.n+' wygrywa lega!',[{key:'gameshot',text:L().leg(P.n),tone:'high'}]);}
     render();return;}
   render();
   if(darts.length===3)endTurn();
 }
-function startPull(){if(photoMode){pull=null;return;}pull={moved:false,calm:0};prevG=null;}
+function startPull(){if(players[cur].bot){pull=null;setTimeout(nextPlayer,2600);return;}if(photoMode){pull=null;return;}pull={moved:false,calm:0};prevG=null;}
 function endTurn(){
   if(over)return; const P=players[cur], t=sum();
-  P.r-=t; over=true; startPull(); render();
+  P.r-=t; over=true; stat(P,t); startPull(); render();
   const f=fin(P.r);
   say(t+(f?' · '+f.d:''),[{num:t}].concat(f?reqItems(P.r):[]));
 }
 function liveRem(i){return (i===cur&&!over)?players[i].r-sum():players[i].r;}
 const esc=t=>t.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 function render(){
-  $('board').innerHTML=players.map((p,i)=>'<div class="pl'+(i===cur?' on':'')+'"><span>'+esc(p.n)+' <small>legi: '+p.l+'/'+target()+'</small></span><span><b>'+liveRem(i)+'</b>'+(players.length>1?'<i data-x="'+i+'">✕</i>':'')+'</span></div>').join('');
+  $('board').innerHTML=players.map((p,i)=>'<div class="pl'+(i===cur?' on':'')+'"><span>'+esc(p.n)+' <small>legi: '+p.l+'/'+target()+' · śr. '+(p.nd?(p.pts/p.nd*3).toFixed(1):'–')+(p.bot?' · 🤖'+p.bot:'')+'</small></span><span><b>'+liveRem(i)+'</b>'+(players.length>1?'<i data-x="'+i+'">✕</i>':'')+'</span></div>').join('');
   $('darts').textContent=(bust?'PRZEKROCZONE · ':'')+darts.map(d=>d.l+' ('+d.p+')').join(' · ')+(darts.length?' = '+sum():'')+(pull?' · wyjmij lotki – zmiana nastąpi automatycznie':'');
 }
 function nextPlayer(){
@@ -157,8 +198,9 @@ function nextPlayer(){
   endTurn(); pull=null;
   if(legEnd){players.forEach(p=>p.r=startVal());legStarter=(legStarter+1)%players.length;cur=legStarter;legEnd=false;}
   else cur=(cur+1)%players.length;
-  turnStart=players[cur].r; darts=[]; over=false; bust=false; snap(); render();
+  turnStart=players[cur].r; darts=[]; over=false; bust=false; lastStat=null; snap(); render();
   info('Rzuca: '+players[cur].n+' ('+players[cur].r+')');
+  if(players[cur].bot)setTimeout(botTurn,1200);
 }
 function pullStep(){
   const g=gray();
@@ -169,27 +211,29 @@ function pullStep(){
   }
   prevG=g;
 }
-$('addp').onclick=()=>{const n=$('pn').value.trim()||('Gracz '+(players.length+1));players.push({n,r:startVal(),l:0});$('pn').value='';render();};
+$('addp').onclick=()=>{const n=$('pn').value.trim()||('Gracz '+(players.length+1));players.push({n,r:startVal(),l:0,pts:0,nd:0,bot:0});$('pn').value='';render();};
 $('legs').onchange=render;
 $('lang').onchange=popVoices;
+$('bl').innerHTML=LV.slice(1).map((v,i)=>'<option value="'+(i+1)+'">Poziom '+(i+1)+' (śr. '+v[0]+', dbl '+Math.round(v[1]*1000)/10+'%)</option>').join('');
+$('addb').onclick=()=>{const l=+$('bl').value;players.push({n:'Bot '+l,r:startVal(),l:0,pts:0,nd:0,bot:l});render();};
 if(window.speechSynthesis)speechSynthesis.onvoiceschanged=popVoices; popVoices();
 $('pk').onchange=e=>{pack={};for(const f of e.target.files)pack[f.name.replace(/\.[^.]+$/,'').toLowerCase()]=URL.createObjectURL(f);info('Wczytano nagrań: '+Object.keys(pack).length);};
 $('tv').onclick=()=>speak([{num:26},{num:85},{num:140},{num:180},{key:'bust',text:L().bust,tone:'low'}]);
 $('board').onclick=e=>{const x=e.target.dataset.x;if(x===undefined)return;players.splice(+x,1);if(cur>=players.length)cur=0;if(+x<cur)cur--;turnStart=players[cur].r;darts=[];over=false;bust=false;legEnd=false;pull=null;render();};
 
-$('cal').onclick=()=>{mode='cal0';cal=null;info('Dotknij ŚRODKA tarczy (bull) na obrazie');};
+$('cal').onclick=()=>{mode='cal';cal=null;calPts=[];info(CALMSG[0]);};
 $('next').onclick=nextPlayer;
-$('undo').onclick=()=>{if(!darts.length)return;if(legEnd){players[cur].l--;legEnd=false;}darts.pop();players[cur].r=turnStart;over=false;bust=false;won=false;pull=null;render();};
-$('reset').onclick=()=>{players.forEach(p=>{p.r=startVal();p.l=0});cur=0;legStarter=0;turnStart=startVal();darts=[];over=false;bust=false;won=false;legEnd=false;pull=null;snap();render();info('Nowa gra. Rzuca: '+players[0].n);};
+$('undo').onclick=()=>{if(!darts.length)return;if(lastStat){lastStat.P.pts-=lastStat.pts;lastStat.P.nd-=lastStat.nd;lastStat=null;}if(legEnd){players[cur].l--;legEnd=false;}darts.pop();players[cur].r=turnStart;over=false;bust=false;won=false;pull=null;render();};
+$('reset').onclick=()=>{players.forEach(p=>{p.r=startVal();p.l=0;p.pts=0;p.nd=0});lastStat=null;cur=0;legStarter=0;turnStart=startVal();darts=[];over=false;bust=false;won=false;legEnd=false;pull=null;snap();render();info('Nowa gra. Rzuca: '+players[0].n);if(players[0].bot)setTimeout(botTurn,1200);};
 $('start').onchange=()=>$('reset').onclick();
 
 cv.addEventListener('click',e=>{
   const b=cv.getBoundingClientRect(), x=(e.clientX-b.left)*cv.width/b.width, y=(e.clientY-b.top)*cv.height/b.height;
-  if(mode==='cal0'){lastD={x,y};mode='cal1';info('Teraz dotknij środka zewnętrznego pierścienia podwójnego (double) w polu 20 – u góry');}
-  else if(mode==='cal1'){
-    const R=Math.hypot(x-lastD.x,y-lastD.y);
-    cal={cx:lastD.x,cy:lastD.y,R:R*1.0,rot:Math.atan2(x-lastD.x,-(y-lastD.y))};
-    mode='play';snap();render();info('Gotowe. Rzuca: '+players[cur].n+'. Dotknięcie obrazu dodaje lotkę ręcznie.');
+  if(mode==='cal'){
+    calPts.push([x,y]);
+    if(calPts.length<4){info(CALMSG[calPts.length]);return;}
+    cal={H:homog(calPts,BP),Hi:homog(BP,calPts)}; buildRoi(); mode='play'; snap(); render();
+    info('Gotowe. Sprawdź, czy zielone linie pokrywają się z tarczą (jeśli nie – kliknij „Kalibruj tarczę" i powtórz). Możesz ustawić kamerę z boku.');
   } else if(mode==='play'){ addDart(x,y); }
 });
 
@@ -199,33 +243,29 @@ function snap(){ if(mode==='play'||cal){ref=gray();base=new Uint8Array(307200);l
 function detect(){
   if(photoMode||mode!=='play'||!ref)return;
   if(pull){pullStep();return;}
-  if(!$('auto').checked||darts.length>=3||over||won)return;
-  const g=gray(), mask=new Uint8Array(307200), pts=[]; const R2=(cal.R*1.05)**2; let n=0;
-  const x0=Math.max(0,cal.cx-cal.R|0), x1=Math.min(639,cal.cx+cal.R|0), y0=Math.max(0,cal.cy-cal.R|0), y1=Math.min(479,cal.cy+cal.R|0);
-  for(let y=y0;y<=y1;y++)for(let x=x0;x<=x1;x++){
-    const i=y*640+x; if((x-cal.cx)**2+(y-cal.cy)**2>R2)continue;
-    if(Math.abs(g[i]-ref[i])>45){mask[i]=1; if(!base[i]){n++;pts.push(i);}}
-  }
+  if(!$('auto').checked||darts.length>=3||over||won||players[cur].bot)return;
+  const g=gray(), mask=new Uint8Array(307200), pts=[]; let n=0;
+  for(let k=0;k<roi.length;k++){const i=roi[k];if(Math.abs(g[i]-ref[i])>45){mask[i]=1;if(!base[i]){n++;pts.push(i);}}}
   if(n>120&&n<8000&&Math.abs(n-lastN)<n*0.12){stable++;} else stable=0;
   lastN=n;
   if(stable>=4){
-    // czubek = najniżej położone piksele nowej plamy (lotka zwykle zwisa lotkami w górę)
     pts.sort((a,b)=>b-a); const k=pts.slice(0,Math.max(5,pts.length*0.06|0));
     let sx=0,sy=0; k.forEach(i=>{sx+=i%640;sy+=(i/640)|0;});
     base=mask; stable=0; lastN=0; addDart(sx/k.length,sy/k.length);
   }
 }
-
 function fit(src,sw,sh){vctx.fillStyle='#000';vctx.fillRect(0,0,640,480);const k=Math.min(640/sw,480/sh),w=sw*k,h=sh*k;vctx.drawImage(src,(640-w)/2,(480-h)/2,w,h);}
 function draw(){
   if(!photoMode&&v.readyState>=2&&v.videoWidth)fit(v,v.videoWidth,v.videoHeight);
   ctx.drawImage(vc,0,0);
+  if(mode==='cal'){ctx.fillStyle='#0ff';calPts.forEach(p=>{ctx.beginPath();ctx.arc(p[0],p[1],6,0,7);ctx.fill();});}
   if(cal){
-    ctx.strokeStyle='#0f0';ctx.lineWidth=2;
-    [1,.953,.629,.582,.0935,.0374].forEach(f=>{ctx.beginPath();ctx.arc(cal.cx,cal.cy,cal.R*f,0,7);ctx.stroke();});
+    ctx.lineWidth=2;
+    const ring=f=>{ctx.beginPath();for(let i=0;i<=72;i++){const a=i/72*2*Math.PI,[x,y]=apply(cal.Hi,Math.sin(a)*f,-Math.cos(a)*f);i?ctx.lineTo(x,y):ctx.moveTo(x,y);}ctx.stroke();};
+    ctx.strokeStyle='#0f0';[1,.953,.629,.582,.0935,.0374].forEach(ring);
     ctx.strokeStyle='#ff0';
-    for(let i=0;i<20;i++){const a=cal.rot+(i*18-9)*Math.PI/180;ctx.beginPath();ctx.moveTo(cal.cx+Math.sin(a)*cal.R*.0935,cal.cy-Math.cos(a)*cal.R*.0935);ctx.lineTo(cal.cx+Math.sin(a)*cal.R,cal.cy-Math.cos(a)*cal.R);ctx.stroke();}
-    ctx.fillStyle='#f00';darts.forEach(d=>{ctx.beginPath();ctx.arc(d.x,d.y,5,0,7);ctx.fill();});
+    for(let i=0;i<20;i++){const a=(i*18-9)*Math.PI/180,[x1,y1]=apply(cal.Hi,Math.sin(a)*.0935,-Math.cos(a)*.0935),[x2,y2]=apply(cal.Hi,Math.sin(a),-Math.cos(a));ctx.beginPath();ctx.moveTo(x1,y1);ctx.lineTo(x2,y2);ctx.stroke();}
+    ctx.fillStyle='#f00';darts.forEach(d=>{if(d.x===undefined)return;ctx.beginPath();ctx.arc(d.x,d.y,5,0,7);ctx.fill();});
   }
   requestAnimationFrame(draw);
 }
@@ -236,7 +276,7 @@ async function startCam(){
   try{
     const st=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'},width:{ideal:1280},height:{ideal:720}},audio:false});
     v.srcObject=st; await v.play();
-    info(mode==='play'?'Kamera działa.':'Kamera działa. Ustaw telefon na wprost tarczy i dotknij środka tarczy (bull).');
+    info(mode==='play'?'Kamera działa.':'Kamera działa. '+CALMSG[calPts.length]);
   }catch(e){
     const h={NotAllowedError:'Zezwól na kamerę (ikona kłódki przy adresie → Uprawnienia) i kliknij „Włącz kamerę". Jeśli strona jest osadzona w innej aplikacji, otwórz ją w pełnym oknie przeglądarki.',NotFoundError:'Nie znaleziono kamery.',NotReadableError:'Kamera jest zajęta przez inną aplikację – zamknij ją i spróbuj ponownie.'}[e.name]||'Spróbuj ponownie lub użyj „📷 Tryb zdjęć".';
     info('Kamera niedostępna ('+e.name+'). '+h);
@@ -247,7 +287,7 @@ $('phb').onclick=()=>$('ph').click();
 $('ph').onchange=e=>{
   const f=e.target.files[0]; if(!f)return;
   const im=new Image(); im.onload=()=>{photoMode=true;photo=im;pull=null;fit(im,im.naturalWidth,im.naturalHeight);
-    if(!cal){mode='cal0';info('Tryb zdjęć. Dotknij ŚRODKA tarczy (bull) na zdjęciu.');}
+    if(!cal){mode='cal';calPts=[];info('Tryb zdjęć. '+CALMSG[0]);}
     else{mode='play';info('Tryb zdjęć. Dotknij miejsc, w których wbiły się lotki. Po rundzie zrób nowe zdjęcie.');}};
   im.src=URL.createObjectURL(f); e.target.value='';
 };
